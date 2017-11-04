@@ -63,6 +63,37 @@ const getItem = promisify(docClient.get.bind(docClient))
 const putItem = promisify(docClient.put.bind(docClient))
 const deleteItem = promisify(docClient.delete.bind(docClient))
 
+const getTableItemCount = (tableName, keys, lastKey, count) => {
+  return docClient.scan({
+    TableName: tableName,
+    ProjectionExpression: keys.map((k) => `#${k}`).join(','),
+    ExpressionAttributeNames: keys.reduce((acc, v) => Object.assign({}, acc, { [`#${v}`]: v }), {}),
+    ExclusiveStartKey: lastKey
+  }).promise()
+    .then((result) => {
+      const newCount = result.Items.length + count;
+      if (result.LastEvaluatedKey) {
+        return getTableItemCount(tableName, keys, result.LastEvaluatedKey, newCount);
+      } else {
+        return newCount;
+      }
+    });
+}
+
+const getTableInfoWithItemCount = (tableInfo) => {
+  if (tableInfo.ItemCount === 0) {
+    const keys = tableInfo.KeySchema.map((val) => val.AttributeName);
+    return getTableItemCount(tableInfo.TableName, keys, null, 0)
+      .then((count) => {
+        return Object.assign({}, tableInfo, {
+          ItemCount: count
+        });
+      });
+  } else {
+    return Promise.resolve(tableInfo);
+  }
+}
+
 app.use(errorhandler())
 app.use('/assets', express.static(path.join(__dirname, '/public')))
 
@@ -73,11 +104,33 @@ app.get('/', (req, res) => {
     } else {
       Promise.all(
         data.TableNames.map(TableName => {
-          return describeTable({ TableName }).then(data => data.Table)
+          return { TableName }
         })
       )
         .then(data => {
-          res.render('tables', { data })
+          res.render('tables', { data, itemsCount: false })
+        })
+        .catch(error => {
+          res.json({ error })
+        })
+    }
+  })
+})
+
+app.get('/tables-with-items-count', (req, res) => {
+  dynamodb.listTables({}, (error, data) => {
+    if (error) {
+      res.json({ error })
+    } else {
+      Promise.all(
+        data.TableNames.map(TableName => {
+          return describeTable({ TableName }).then((data) => {
+            return getTableInfoWithItemCount(data.Table);
+          })
+        })
+      )
+        .then(data => {
+          res.render('tables', { data, itemsCount: true })
         })
         .catch(error => {
           res.json({ error })
@@ -154,12 +207,12 @@ app.get('/tables/:TableName/get', (req, res, next) => {
   if (req.query.hash) {
     if (req.query.range) {
       return res.redirect(
-        `/tables/${TableName}/items/${req.query.hash}${encodeURIComponent(
+        `/tables/${TableName}/items/${encodeURIComponent(req.query.hash)}${encodeURIComponent(
           ','
-        )}${req.query.range}`
+        )}${encodeURIComponent(req.query.range)}`
       )
     } else {
-      return res.redirect(`/tables/${TableName}/items/${req.query.hash}`)
+      return res.redirect(`/tables/${TableName}/items/${encodeURIComponent(req.query.hash)}`)
     }
   }
   describeTable({ TableName }).then(description => {
@@ -193,7 +246,7 @@ app.get('/tables/:TableName/get', (req, res, next) => {
   })
 })
 
-var doSearch = function(
+var doSearch = function (
   docClient,
   tableName,
   scanParams,
@@ -213,7 +266,7 @@ var doSearch = function(
   if (limit != null) params.Limit = limit
   if (startKey != null) params.ExclusiveStartKey = startKey
   var items = []
-  var processNextBite = function(err, items, nextKey) {
+  var processNextBite = function (err, items, nextKey) {
     if (!err && nextKey) {
       params.ExclusiveStartKey = nextKey
       getNextBite(params, items, processNextBite)
@@ -227,8 +280,8 @@ var doSearch = function(
     query: docClient.query
   }[readOperation].bind(docClient)
 
-  var getNextBite = function(params, items, callback) {
-    var result = readMethod(params, function(err, data) {
+  var getNextBite = function (params, items, callback) {
+    var result = readMethod(params, function (err, data) {
       var obj = null
 
       if (err != null) {
@@ -259,7 +312,7 @@ var doSearch = function(
   getNextBite(params, items, processNextBite)
 }
 
-var getPage = function(
+var getPage = function (
   docClient,
   keySchema,
   TableName,
@@ -275,7 +328,7 @@ var getPage = function(
     scanParams,
     10,
     startKey,
-    function(err, items) {
+    function (err, items) {
       let nextKey = null
       if (_.size(pageItems) > pageSize) {
         pageItems = pageItems.slice(0, pageSize)
@@ -283,7 +336,7 @@ var getPage = function(
       }
       done(pageItems, err, nextKey)
     },
-    function(err, items, lastStartKey) {
+    function (err, items, lastStartKey) {
       for (
         let i = 0;
         i < items.length && _.size(pageItems) < pageSize + 1;
@@ -357,7 +410,7 @@ app.get('/tables/:TableName', (req, res, next) => {
         params,
         25,
         startKey,
-        function(pageItems, err, nextKey) {
+        function (pageItems, err, nextKey) {
           let nextKeyParam = nextKey
             ? encodeURIComponent(JSON.stringify(nextKey))
             : null
